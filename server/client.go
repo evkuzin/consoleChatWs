@@ -1,16 +1,11 @@
-// Copyright 2013 The Gorilla WebSocket Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-package main
+package server
 
 import (
 	"encoding/json"
+	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 const (
@@ -68,7 +63,7 @@ func (c *Client) readPump() {
 	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
-		logger.Debug("Pong!")
+		c.hub.Logger.Debug("Pong!")
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
@@ -76,28 +71,28 @@ func (c *Client) readPump() {
 	for {
 		t, r, err := c.conn.NextReader()
 		if err != nil {
-			logger.Error(err.Error())
+			c.hub.Logger.Error(err.Error())
 			return
 		}
-		logger.Debugf("Got Message type: %v, reader: %#v", t, r)
+		c.hub.Logger.Debugf("Got Message type: %v, reader: %#v", t, r)
 
 		switch t {
 		case websocket.BinaryMessage:
-			logger.Debugf("Got binary Message from websocket")
+			c.hub.Logger.Debugf("Got binary Message from websocket")
 			d := json.NewDecoder(r)
 			err := d.Decode(&msg)
 			if err != nil {
-				logger.Warnf("cannot decode Message %v", err.Error())
+				c.hub.Logger.Warnf("cannot decode Message %v", err.Error())
 			}
-			logger.Debugf("Decoded Message is: %#v", msg)
+			c.hub.Logger.Debugf("Decoded Message is: %#v", msg)
 		case websocket.TextMessage:
-			logger.Debugf("Got text Message from websocket. Not implemented yet")
+			c.hub.Logger.Debugf("Got text Message from websocket. Not implemented yet")
 		}
 
 		if msg.Command {
 			switch msg.Message {
 			case "/getusers":
-				logger.Debugf("got Command get users")
+				c.hub.Logger.Debugf("got Command get users")
 				usersOnline := "Users online:\n"
 				for user := range c.hub.clients {
 					usersOnline += user.name + "\n"
@@ -112,7 +107,7 @@ func (c *Client) readPump() {
 				}
 				c.send <- data
 			default:
-				logger.Debugf("got unknown Command")
+				c.hub.Logger.Debugf("got unknown Command")
 				data, err := json.Marshal(message{
 					Name:    "server",
 					Message: "no such Command on the server",
@@ -125,7 +120,7 @@ func (c *Client) readPump() {
 			}
 
 		} else {
-			logger.Debugf("got Message to send")
+			c.hub.Logger.Debugf("got Message to send")
 			data, err := json.Marshal(message{
 				Name:    c.name,
 				Message: msg.Message,
@@ -154,7 +149,7 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			logger.Debugf("sending Message to user %v", c.name)
+			c.hub.Logger.Debugf("sending Message to user %v", c.name)
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
@@ -168,7 +163,7 @@ func (c *Client) writePump() {
 			}
 
 		case <-ticker.C:
-			logger.Debug("Ping!")
+			c.hub.Logger.Debug("Ping!")
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
@@ -177,13 +172,13 @@ func (c *Client) writePump() {
 	}
 }
 
-// serveWs handles websocket requests from the peer.
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+// ServeWs handles websocket requests from the peer.
+func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	name := r.Header.Get("X-Api-Name")
-	logger.Debugf("Name: %v", name)
+	hub.Logger.Debugf("Name: %v", name)
 	if name == "" {
 		http.Error(w, "Name required for auth", http.StatusProxyAuthRequired)
-		logger.Debugf("Got non authenticated request from %v", r.Host)
+		hub.Logger.Debugf("Got non authenticated request from %v", r.Host)
 		return
 	}
 	for u := range hub.clients {
@@ -194,14 +189,14 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logger.Debugf("err: %v", err.Error())
+		hub.Logger.Debugf("err: %v", err.Error())
 		return
 	}
 	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256), name: name}
 
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.
-	logger.Debugf("starting send/receive goroutimes for userchannel %v", name)
+	hub.Logger.Debugf("starting send/receive goroutimes for userchannel %v", name)
 	go client.writePump()
 	go client.readPump()
 	hub.registerChan <- client

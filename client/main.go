@@ -1,21 +1,17 @@
-package main
+package client
 
 import (
 	"bufio"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"github.com/gorilla/websocket"
-	term "github.com/nsf/termbox-go"
-	"github.com/sirupsen/logrus"
-	"log"
-	"net/http"
-	"net/url"
 	"os"
-	"os/signal"
 	"reflect"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+	term "github.com/nsf/termbox-go"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -32,16 +28,6 @@ const (
 	maxMessageSize = 512
 )
 
-var server = flag.String("server", "localhost:8080", "http service address")
-var name = flag.String("name", "", "user Name")
-
-var logger = &logrus.Logger{
-	ReportCaller: true,
-	Level:        logrus.InfoLevel,
-	Formatter:    new(logrus.TextFormatter),
-	Out:          os.Stderr,
-}
-
 type message struct {
 	Name    string
 	Message string
@@ -49,73 +35,26 @@ type message struct {
 }
 
 type Chat struct {
-	stdIn *bufio.Reader
-	mutex *sync.Mutex
-	conn  *websocket.Conn
-	name  *string
-	send  chan []byte
+	StdIn  *bufio.Reader
+	Mutex  *sync.Mutex
+	Conn   *websocket.Conn
+	Name   *string
+	Send   chan []byte
+	Logger *logrus.Logger
 }
 
-func NewChat(c *websocket.Conn, name *string) *Chat {
+func NewChat(c *websocket.Conn, name *string, logger *logrus.Logger) *Chat {
 	chat := &Chat{
-		mutex: &sync.Mutex{},
-		conn:  c,
-		name:  name,
-		send:  make(chan []byte, 256),
+		Mutex:  &sync.Mutex{},
+		Conn:   c,
+		Name:   name,
+		Send:   make(chan []byte, 256),
+		Logger: logger,
 	}
-	logger.Debug("Create new chat")
 	return chat
 }
 
-func main() {
-
-	flag.Parse()
-	log.SetFlags(0)
-
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
-
-	u := url.URL{Scheme: "ws", Host: *server, Path: "/ws"}
-	log.Printf("connecting to %s", u.String())
-
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), http.Header{
-		"X-Api-Name": []string{*name},
-	})
-	if err != nil {
-		logger.Debugf("dial err: %v", err)
-	}
-	chat := NewChat(c, name)
-
-	defer chat.conn.Close()
-	done := make(chan struct{})
-
-	logger.Debug("start reading/writing messages goroutines")
-	go chat.readPump()
-	go chat.writePump()
-
-	logger.Debug("start reading from stdin goroutine")
-	go chat.stdInScanner()
-
-	for {
-		select {
-		case <-done:
-			logger.Info("Closing chat")
-			return
-		case <-interrupt:
-			logger.Debug("Closing chat")
-
-			// Cleanly close the connection by sending a close Message and then
-			// waiting (with timeout) for the server to close the connection.
-			err := c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			if err != nil {
-				logger.Error(err.Error())
-			}
-			return
-		}
-	}
-}
-
-func (c *Chat) stdInScanner() {
+func (c *Chat) StdInScanner() {
 
 	err := term.Init()
 	if err != nil {
@@ -134,18 +73,17 @@ func (c *Chat) stdInScanner() {
 					continue
 				}
 				fmt.Print("\rEnter text: ")
-				logger.Debugf("Read from stdout: %s", string(msg))
 
 				data, err := json.Marshal(message{
-					Name:    *c.name,
+					Name:    *c.Name,
 					Message: string(msg),
 					Command: msg[0] == '/',
 				})
 				if err != nil {
-					logger.Error(err.Error())
+					c.Logger.Error(err.Error())
 					return
 				}
-				c.send <- data
+				c.Send <- data
 				msg = []rune{}
 				continue
 			case term.KeyCtrlC:
@@ -154,7 +92,7 @@ func (c *Chat) stdInScanner() {
 				fmt.Print(" ")
 				msg = append(msg, ' ')
 			default:
-				logger.Debugf("get rune %#v", ev.Ch)
+				c.Logger.Debugf("get rune %#v", ev.Ch)
 				fmt.Print(string(ev.Ch))
 				msg = append(msg, ev.Ch)
 			}
@@ -166,86 +104,86 @@ func (c *Chat) stdInScanner() {
 
 }
 
-// readPump pumps messages from the websocket connection to the hub.
+// ReadPump pumps messages from the websocket connection to the hub.
 //
 // The application ensures that there is at most one reader on a connection by executing all
 // reads from this goroutine.
-func (c *Chat) readPump() {
+func (c *Chat) ReadPump() {
 
 	defer func() {
-		c.conn.Close()
+		c.Conn.Close()
 	}()
-	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(pongWait))
-		logger.Debug("Pong!")
+	c.Conn.SetReadLimit(maxMessageSize)
+	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.Conn.SetPongHandler(func(string) error {
+		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.Logger.Debug("Pong!")
 		return nil
 	})
 	msg := message{}
 	for {
-		t, r, err := c.conn.NextReader()
+		t, r, err := c.Conn.NextReader()
 		if err != nil {
-			logger.Error(err.Error())
+			c.Logger.Error(err.Error())
 			return
 		}
-		logger.Debugf("Got Message type: %v, reader: %#v", t, r)
+		c.Logger.Debugf("Got Message type: %v, reader: %#v", t, r)
 
 		switch t {
 		case websocket.BinaryMessage:
-			logger.Debugf("Got binary Message from websocket")
+			c.Logger.Debugf("Got binary Message from websocket")
 			d := json.NewDecoder(r)
 			err := d.Decode(&msg)
 			if err != nil {
-				logger.Warnf("cannot decode Message %v", err.Error())
+				c.Logger.Warnf("cannot decode Message %v", err.Error())
 			}
-			logger.Debugf("Decoded Message is: %#v", msg)
+			c.Logger.Debugf("Decoded Message is: %#v", msg)
 		case websocket.TextMessage:
-			logger.Debugf("Got text Message from websocket")
+			c.Logger.Debugf("Got text Message from websocket")
 		}
 		c.logMessage(msg)
 	}
 }
 
 func (c *Chat) logMessage(msg message) {
-	logger.Debug("push Message to stdout")
-	c.mutex.Lock()
+	c.Logger.Debug("push Message to stdout")
+	c.Mutex.Lock()
 	fmt.Printf("\r%s wrote: %s\n", msg.Name, msg.Message)
 	fmt.Printf("Enter text: ")
-	c.mutex.Unlock()
+	c.Mutex.Unlock()
 }
 
-// writePump pumps messages from the client to the websocket connection.
+// WritePump pumps messages from the client to the websocket connection.
 //
 // The application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
-func (c *Chat) writePump() {
+func (c *Chat) WritePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.Conn.Close()
 	}()
-	logger.Debugf("starting writePump thread")
+	c.Logger.Debugf("starting writePump thread")
 	for {
 		select {
-		case msg, ok := <-c.send:
-			logger.Debugf("have Message to send: %#v", msg)
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+		case msg, ok := <-c.Send:
+			c.Logger.Debugf("have Message to send: %#v", msg)
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			err := c.conn.WriteMessage(websocket.BinaryMessage, msg)
+			err := c.Conn.WriteMessage(websocket.BinaryMessage, msg)
 			if err != nil {
 				return
 			}
 
 		case <-ticker.C:
-			logger.Debug("Ping!")
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			c.Logger.Debug("Ping!")
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
